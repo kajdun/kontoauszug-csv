@@ -1,0 +1,29 @@
+(common) {
+	request_body {
+		max_size 35MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		transport http {
+			read_timeout 10m
+		}
+	}
+}
+
+www.satik-tec.de {
+	import common
+}
+
+# Direkter Aufruf per IP -> Domain
+https://95.217.0.246 {
+	tls internal
+	redir https://www.satik-tec.de{uri} permanent
+}
+http://95.217.0.246 {
+	redir https://www.satik-tec.de{uri} permanent
+}

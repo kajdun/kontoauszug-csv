@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kontoauszug zu CSV</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="logo" aria-hidden="true">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13h6M9 17h6"/></svg>
+  </div>
+  <span class="title">Kontoauszug → CSV</span>
+  <span class="spacer"></span>
+  <span class="chip">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    Dateien werden nicht gespeichert
+  </span>
+  <form method="post" action="/logout"><button class="btn ghost sm">Abmelden</button></form>
+</header>
+
+<input id="input" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.gif" class="sr-only">
+
+<div class="layout">
+  <aside class="sidebar">
+    <label class="upload" for="input">
+      <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg></span>
+      <div><strong>Dateien hinzufügen</strong><span>PDF, PNG, JPG · oder hierher ziehen</span></div>
+    </label>
+    <nav class="panel filelist" id="filelist" aria-label="Dateien"></nav>
+  </aside>
+
+  <main class="content" id="content"></main>
+</div>
+
+<div class="drag-overlay" id="overlay"><div>Dateien loslassen zum Hochladen</div></div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+/* ------------------------------------------------------------ State */
+const files = [];          // {id, name, status: run|done|error, result, error}
+let selected = "all";
+let query = "";
+let nextId = 1;
+
+/* ------------------------------------------------------------ Helpers */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const toCents = v => {
+  const m = String(v ?? "").trim().replace(/^\+/, "").match(/^(-?)(\d+)(?:\.(\d{1,2}))?$/);
+  return m ? (m[1] ? -1 : 1) * (parseInt(m[2], 10) * 100 + parseInt((m[3] || "0").padEnd(2, "0"), 10)) : null;
+};
+const eur = (c, cur = "EUR") => (c / 100).toLocaleString("de-DE", {style: "currency", currency: cur || "EUR"});
+const num = c => (c / 100).toLocaleString("de-DE", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fmtDate = iso => /^\d{4}-\d{2}-\d{2}$/.test(iso || "") ? iso.split("-").reverse().join(".") : esc(iso || "");
+const parseDate = s => { const m = s.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : s.trim(); };
+const parseAmount = s => s.trim().replace(/\s|€/g, "").replace(/\./g, "").replace(",", ".");
+const ICON = {
+  x: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>',
+  dl: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>',
+  search: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>',
+  ok: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg>',
+  warn: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17h.01"/></svg>',
+  upload: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>',
+};
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2600); }
+
+/* ------------------------------------------------------------ Logik */
+function check(r) {
+  const cents = r.buchungen.map(b => toCents(b.betrag));
+  const sum = cents.reduce((a, c) => a + (c ?? 0), 0);
+  const inSum = cents.filter(c => c > 0).reduce((a, c) => a + c, 0);
+  const outSum = cents.filter(c => c < 0).reduce((a, c) => a + c, 0);
+  const base = {sum, inSum, outSum};
+  if (cents.some(c => c === null)) return {...base, cls: "bad", label: "Fehler", text: "Mindestens ein Betrag ist ungültig (rot markiert)."};
+  const s = toCents(r.anfangssaldo), e = toCents(r.endsaldo);
+  if (s === null || e === null) return {...base, cls: "warn", label: "Nicht prüfbar", text: "Im Dokument steht kein Anfangs- oder Endsaldo, die Summe konnte nicht gegengeprüft werden."};
+  const diff = s + sum - e;
+  return diff === 0
+    ? {...base, s, e, cls: "ok", label: "Geprüft", text: `Saldo stimmt: ${num(s)} + ${num(sum)} = ${num(e)}`}
+    : {...base, s, e, diff, cls: "bad", label: "Abweichung", text: `Saldo weicht um ${eur(diff, r.waehrung)} ab. Erwartet ${num(e)}, berechnet ${num(s + sum)}.`};
+}
+
+const done = () => files.filter(f => f.status === "done");
+const running = () => files.filter(f => f.status === "run").length;
+
+/* ------------------------------------------------------------ Render: Sidebar */
+function renderSidebar() {
+  const list = $("#filelist");
+  if (!files.length) { list.innerHTML = `<div class="empty-list">Noch keine Dateien hochgeladen.</div>`; return; }
+  const total = done().reduce((a, f) => a + f.result.buchungen.length, 0);
+  const item = (key, dot, name, sub, count, removable) => `
+    <div class="fitem ${selected === key ? "active" : ""}" role="button" tabindex="0" data-key="${key}">
+      <span class="dot ${dot}"></span>
+      <span style="min-width:0"><span class="name" style="display:block">${esc(name)}</span><span class="sub">${esc(sub)}</span></span>
+      <span style="display:flex;align-items:center;gap:2px">
+        <span class="count">${count}</span>
+        ${removable ? `<button class="icon-btn rm" data-rm="${key}" aria-label="Datei entfernen">${ICON.x}</button>` : ""}
+      </span>
+    </div>`;
+  let html = item("all", "", "Alle Dateien", `${done().length} von ${files.length} verarbeitet`, total, false);
+  html += `<div class="label">Dateien</div>`;
+  for (const f of files) {
+    if (f.status === "run") html += item(f.id, "run", f.name, "wird gelesen …", "", false);
+    else if (f.status === "error") html += item(f.id, "bad", f.name, "Fehler", "", true);
+    else { const c = check(f.result); html += item(f.id, c.cls, f.name, `${c.label} · ${f.result.methode}`, f.result.buchungen.length, true); }
+  }
+  list.innerHTML = html;
+}
+
+/* ------------------------------------------------------------ Render: Content */
+function renderContent() {
+  const el = $("#content");
+  if (!files.length) {
+    el.innerHTML = `
+      <label class="hero" for="input">
+        <span class="ico">${ICON.upload}</span>
+        <h2>Kontoauszüge hochladen</h2>
+        <p>Zieh PDFs oder Screenshots aus dem Online-Banking hierher oder klicke zum Auswählen. Mehrere Dateien auf einmal sind möglich.</p>
+        <span class="btn">Dateien auswählen</span>
+      </label>
+      <div class="steps">
+        <div class="panel step"><span class="n">1</span><b>Hochladen</b><span>PDF-Auszüge, Scans oder Screenshots, auch von verschiedenen Banken.</span></div>
+        <div class="panel step"><span class="n">2</span><b>Prüfen</b><span>Saldo-Check zeigt sofort, ob alle Buchungen vollständig erkannt wurden.</span></div>
+        <div class="panel step"><span class="n">3</span><b>Herunterladen</b><span>Eine CSV für alle Dateien, direkt importierbar für die Buchhaltung.</span></div>
+      </div>`;
+    return;
+  }
+
+  const f = selected === "all" ? null : files.find(x => x.id === selected);
+  if (f?.status === "run") {
+    el.innerHTML = `${head(f.name, `<span>Wird gelesen … das dauert meist 20–60 Sekunden.</span>`, false)}
+      <div class="panel"><div class="skeleton">${"<div></div>".repeat(8)}</div></div>`;
+    return;
+  }
+  if (f?.status === "error") {
+    el.innerHTML = `${head(f.name, "", false)}
+      <div class="panel error-card"><h2>Datei konnte nicht verarbeitet werden</h2><p>${esc(f.error)}</p>
+      <button class="btn ghost sm" data-retry="${f.id}">Erneut versuchen</button></div>`;
+    return;
+  }
+
+  const items = f ? [f] : done();
+  const rows = items.flatMap(x => x.result.buchungen.map((b, i) => ({f: x, b, i})));
+  const cents = rows.map(r => toCents(r.b.betrag) ?? 0);
+  const inSum = cents.filter(c => c > 0).reduce((a, c) => a + c, 0);
+  const outSum = cents.filter(c => c < 0).reduce((a, c) => a + c, 0);
+  const cur = items[0]?.result.waehrung || "EUR";
+
+  let meta = "", banner = "", checkTile;
+  if (f) {
+    const r = f.result, c = check(r);
+    meta = [r.bank, r.iban, r.kontoinhaber,
+      (r.zeitraum_von || r.zeitraum_bis) ? `${fmtDate(r.zeitraum_von)} – ${fmtDate(r.zeitraum_bis)}` : "",
+      `erkannt via ${r.methode}`].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join("");
+    banner = `<div class="banner ${c.cls}">${c.cls === "ok" ? ICON.ok : ICON.warn}<div><b>${c.label}.</b> ${esc(c.text)}
+      ${r.hinweise?.length ? `<ul>${r.hinweise.map(h => `<li>${esc(h)}</li>`).join("")}</ul>` : ""}</div></div>`;
+    checkTile = c.s !== undefined
+      ? `<div class="v">${eur(c.e, cur)}</div><div class="s">Anfang ${eur(c.s, cur)}</div>`
+      : `<div class="v" style="color:var(--muted)">–</div><div class="s">nicht im Dokument</div>`;
+  } else {
+    const cs = done().map(x => check(x.result));
+    const nOk = cs.filter(c => c.cls === "ok").length, nBad = cs.filter(c => c.cls === "bad").length, nWarn = cs.length - nOk - nBad;
+    meta = `<span>${done().length} Datei(en)</span>${running() ? `<span>${running()} in Bearbeitung</span>` : ""}`;
+    if (nBad) banner = `<div class="banner bad">${ICON.warn}<div><b>${nBad} Datei(en) mit Abweichung.</b> Bitte links auswählen und die markierten Buchungen prüfen.</div></div>`;
+    else if (nWarn) banner = `<div class="banner warn">${ICON.warn}<div><b>${nWarn} Datei(en) nicht prüfbar</b> (kein Anfangs-/Endsaldo im Dokument). Bitte stichprobenartig kontrollieren.</div></div>`;
+    else if (cs.length) banner = `<div class="banner ok">${ICON.ok}<div><b>Alle Salden stimmen.</b> Die Buchungen sind vollständig erkannt.</div></div>`;
+    checkTile = `<div class="v">${nOk} / ${cs.length}</div><div class="s">Dateien mit stimmendem Saldo</div>`;
+  }
+
+  const q = query.toLowerCase();
+  const visible = q ? rows.filter(({b}) => [b.gegenpartei, b.verwendungszweck, b.buchungsart, b.betrag, fmtDate(b.buchungsdatum)].join(" ").toLowerCase().includes(q)) : rows;
+
+  el.innerHTML = `
+    ${head(f ? f.name : "Alle Dateien", meta, true)}
+    <div class="stats">
+      <div class="panel stat"><div class="k">Buchungen</div><div class="v">${rows.length}</div><div class="s">${items.length} Datei(en)</div></div>
+      <div class="panel stat"><div class="k">Eingänge</div><div class="v pos">${eur(inSum, cur)}</div><div class="s">${cents.filter(c => c > 0).length} Gutschriften</div></div>
+      <div class="panel stat"><div class="k">Ausgänge</div><div class="v neg">${eur(outSum, cur)}</div><div class="s">${cents.filter(c => c < 0).length} Belastungen</div></div>
+      <div class="panel stat"><div class="k">${f ? "Endsaldo" : "Saldo-Prüfung"}</div>${checkTile}</div>
+    </div>
+    ${banner}
+    <div class="panel table-card">
+      <div class="table-tools">
+        <label class="search">${ICON.search}<span class="sr-only">Suchen</span><input id="q" type="search" placeholder="Buchungen durchsuchen …" value="${esc(query)}"></label>
+        <span class="hint">Zellen anklicken zum Korrigieren</span>
+      </div>
+      <div class="table-wrap">
+        ${visible.length ? `<table>
+          <thead><tr><th>Datum</th><th>Empfänger / Auftraggeber</th><th>Verwendungszweck</th><th>Art</th>${f ? "" : "<th>Datei</th>"}<th class="num">Betrag</th><th></th></tr></thead>
+          <tbody>${visible.map(({f: x, b, i}) => {
+            const c = toCents(b.betrag);
+            return `<tr data-f="${x.id}" data-i="${i}">
+              <td class="date" contenteditable data-k="buchungsdatum">${fmtDate(b.buchungsdatum)}</td>
+              <td class="party" contenteditable data-k="gegenpartei">${esc(b.gegenpartei)}</td>
+              <td class="purpose" contenteditable data-k="verwendungszweck">${esc(b.verwendungszweck)}</td>
+              <td class="kind" contenteditable data-k="buchungsart">${b.buchungsart ? `<span>${esc(b.buchungsart)}</span>` : ""}</td>
+              ${f ? "" : `<td class="src">${esc(x.name)}</td>`}
+              <td class="num ${c === null ? "invalid" : c < 0 ? "neg" : "pos"}" contenteditable data-k="betrag">${c === null ? esc(b.betrag) : num(c)}</td>
+              <td class="row-act"><button class="icon-btn" data-del aria-label="Buchung löschen" title="Buchung löschen">${ICON.trash}</button></td>
+            </tr>`; }).join("")}</tbody>
+        </table>` : `<div class="no-rows">${q ? "Keine Buchungen passen zur Suche." : running() ? "Dateien werden noch gelesen …" : "Keine Buchungen gefunden."}</div>`}
+      </div>
+    </div>`;
+}
+
+function head(title, meta, withActions) {
+  const n = done().length;
+  return `<div class="content-head">
+    <div style="min-width:0"><h1>${esc(title)}</h1><div class="meta">${meta}</div></div>
+    ${withActions || files.length ? `<div class="actions">
+      <button class="btn ghost" id="clear" ${running() ? "disabled" : ""}>Alles leeren</button>
+      <button class="btn" id="download" ${!n || running() ? "disabled" : ""}>${ICON.dl} CSV herunterladen${n > 1 ? ` (${n} Dateien)` : ""}</button>
+    </div>` : ""}
+  </div>`;
+}
+
+function render() { document.body.classList.toggle("is-empty", !files.length); renderSidebar(); renderContent(); }
+
+/* ------------------------------------------------------------ Upload */
+async function run(f) {
+  f.status = "run"; render();
+  try {
+    const fd = new FormData(); fd.append("file", f.file);
+    const res = await fetch("/api/extract", {method: "POST", body: fd});
+    if (res.status === 401) { location.href = "/login"; return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Serverfehler (${res.status})`);
+    f.result = data; f.status = "done";
+  } catch (e) {
+    f.status = "error"; f.error = e.message === "Failed to fetch" ? "Keine Verbindung zum Server." : e.message;
+  }
+  render();
+  if (!running()) toast("Alle Dateien verarbeitet");
+}
+
+function addFiles(list) {
+  const added = [...list].map(file => ({id: String(nextId++), name: file.name, file, status: "run"}));
+  if (!added.length) return;
+  files.push(...added);
+  selected = added.length === 1 && files.length === 1 ? added[0].id : "all";
+  added.forEach(run);
+}
+
+/* ------------------------------------------------------------ Events */
+$("#input").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
+
+let dragDepth = 0;
+addEventListener("dragenter", e => { if (e.dataTransfer?.types.includes("Files")) { dragDepth++; $("#overlay").classList.add("show"); } });
+addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#overlay").classList.remove("show"); } });
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => { e.preventDefault(); dragDepth = 0; $("#overlay").classList.remove("show"); addFiles(e.dataTransfer.files); });
+
+$("#filelist").addEventListener("click", e => {
+  const rm = e.target.closest("[data-rm]");
+  if (rm) {
+    e.stopPropagation();
+    files.splice(files.findIndex(f => f.id === rm.dataset.rm), 1);
+    if (selected === rm.dataset.rm) selected = "all";
+    render(); return;
+  }
+  const it = e.target.closest(".fitem");
+  if (it) { selected = it.dataset.key; query = ""; render(); }
+});
+$("#filelist").addEventListener("keydown", e => { if ((e.key === "Enter" || e.key === " ") && e.target.matches(".fitem")) { e.preventDefault(); e.target.click(); } });
+
+$("#content").addEventListener("click", async e => {
+  if (e.target.closest("#clear")) { if (confirm("Alle Dateien und Ergebnisse aus der Liste entfernen?")) { files.length = 0; selected = "all"; render(); } return; }
+  if (e.target.closest("#download")) return download();
+  const retry = e.target.closest("[data-retry]");
+  if (retry) return run(files.find(f => f.id === retry.dataset.retry));
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const tr = del.closest("tr"), f = files.find(x => x.id === tr.dataset.f);
+    f.result.buchungen.splice(+tr.dataset.i, 1);
+    render(); toast("Buchung gelöscht");
+  }
+});
+
+$("#content").addEventListener("input", e => {
+  if (e.target.id !== "q") return;
+  query = e.target.value;
+  const pos = e.target.selectionStart;
+  renderContent();
+  const q = $("#q"); q.focus(); q.setSelectionRange(pos, pos);
+});
+
+$("#content").addEventListener("keydown", e => {
+  if (e.target.matches("td[contenteditable]") && e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  if (e.target.matches("td[contenteditable]") && e.key === "Escape") { renderContent(); }
+});
+
+$("#content").addEventListener("focusout", e => {
+  const td = e.target;
+  if (!td.matches?.("td[contenteditable]")) return;
+  const tr = td.closest("tr"), f = files.find(x => x.id === tr.dataset.f);
+  const b = f.result.buchungen[+tr.dataset.i], k = td.dataset.k, v = td.textContent;
+  const nv = k === "betrag" ? parseAmount(v) : k === "buchungsdatum" ? parseDate(v) : v.trim();
+  if (nv !== (b[k] ?? "")) { b[k] = nv; render(); }
+});
+
+async function download() {
+  const bad = done().filter(f => check(f.result).cls === "bad").map(f => f.name);
+  if (bad.length && !confirm(`Bei ${bad.length} Datei(en) stimmt der Saldo nicht:\n\n${bad.join("\n")}\n\nTrotzdem herunterladen?`)) return;
+  const res = await fetch("/api/csv", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(done().map(f => f.result))});
+  if (res.status === 401) { location.href = "/login"; return; }
+  if (!res.ok) { toast("CSV konnte nicht erstellt werden"); return; }
+  const blob = await res.blob();
+  const name = (res.headers.get("Content-Disposition") || "").match(/filename="(.+)"/)?.[1] || "kontoauszug.csv";
+  const a = Object.assign(document.createElement("a"), {href: URL.createObjectURL(blob), download: name});
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("CSV heruntergeladen");
+}
+
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+anthropic
+fastapi
+uvicorn
+python-multipart
+itsdangerous
+pdfplumber
+pillow
